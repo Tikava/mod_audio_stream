@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "base64.h"
+#include <algorithm>
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
@@ -186,6 +187,61 @@ public:
         }
     }
 
+    switch_status_t streamRawToFreeswitch(switch_core_session_t *session, const std::string &rawAudio, int sampleRate) {
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        auto *bug = (switch_media_bug_t *) switch_channel_get_private(channel, MY_BUG_NAME);
+        if (!bug) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) playback failed - no media bug\n", m_sessionId.c_str());
+            return SWITCH_STATUS_FALSE;
+        }
+        auto *tech_pvt = (private_t *) switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) playback failed - no tech_pvt\n", m_sessionId.c_str());
+            return SWITCH_STATUS_FALSE;
+        }
+
+        switch_codec_t *codec = switch_core_session_get_read_codec(session);
+        if (!codec) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) playback failed - no codec\n", m_sessionId.c_str());
+            return SWITCH_STATUS_FALSE;
+        }
+
+        const int channels = tech_pvt->channels > 0 ? tech_pvt->channels : 1;
+        const size_t bytes_per_sample = sizeof(int16_t) * channels;
+        const int target_rate = sampleRate > 0 ? sampleRate : codec->implementation->actual_samples_per_second;
+        const size_t samples_per_frame = target_rate / 50; // 20ms chunk
+        if (!samples_per_frame || !bytes_per_sample) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) playback failed - invalid frame sizing (rate=%d, channels=%d)\n",
+                              m_sessionId.c_str(), target_rate, channels);
+            return SWITCH_STATUS_FALSE;
+        }
+
+        const size_t frame_bytes = samples_per_frame * bytes_per_sample;
+        switch_status_t status = SWITCH_STATUS_SUCCESS;
+        size_t offset = 0;
+
+        while (offset < rawAudio.size()) {
+            const size_t chunk = std::min(frame_bytes, rawAudio.size() - offset);
+            switch_frame_t write_frame = {0};
+            write_frame.codec = codec;
+            write_frame.data = (void *)(rawAudio.data() + offset);
+            write_frame.datalen = chunk;
+            write_frame.buflen = chunk;
+            write_frame.samples = chunk / bytes_per_sample;
+            write_frame.rate = target_rate;
+            write_frame.channels = channels;
+
+            status = switch_core_session_write_frame(session, &write_frame, SWITCH_IO_FLAG_NONE, 0);
+            if (status != SWITCH_STATUS_SUCCESS) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) playback write failed\n", m_sessionId.c_str());
+                break;
+            }
+            offset += chunk;
+        }
+
+        return status;
+    }
+
     switch_bool_t processMessage(switch_core_session_t* session, std::string& message) {
         cJSON* json = cJSON_Parse(message.c_str());
         switch_bool_t status = SWITCH_FALSE;
@@ -201,7 +257,9 @@ public:
                 const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
                 std::string fileType;
                 int sampleRate;
-                if (0 == strcmp(jsAudioDataType, "raw")) {
+                bool handledPlayback = false;
+                sampleRate = 0;
+                if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw")) {
                     cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
                     sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
                     std::unordered_map<int, const char*> sampleRateMap = {
@@ -212,21 +270,23 @@ public:
                             {48000, ".r48"},
                             {64000, ".r64"}
                     };
-                    auto it = sampleRateMap.find(sampleRate);
-                    fileType = (it != sampleRateMap.end()) ? it->second : "";
-                } else if (0 == strcmp(jsAudioDataType, "wav")) {
+                    if (sampleRateMap.find(sampleRate) == sampleRateMap.end()) {
+                        fileType = "";
+                    } else {
+                        fileType = sampleRateMap[sampleRate];
+                    }
+                } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "wav")) {
                     fileType = ".wav";
-                } else if (0 == strcmp(jsAudioDataType, "mp3")) {
+                } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "mp3")) {
                     fileType = ".mp3";
-                } else if (0 == strcmp(jsAudioDataType, "ogg")) {
+                } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "ogg")) {
                     fileType = ".ogg";
-                } else {
+                } else if (jsAudioDataType) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
                                       m_sessionId.c_str(), jsAudioDataType);
                 }
 
-                if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
-                    char filePath[256];
+                if(jsonAudio && jsonAudio->valuestring != nullptr && jsAudioDataType) {
                     std::string rawAudio;
                     try {
                         rawAudio = base64_decode(jsonAudio->valuestring);
@@ -236,17 +296,33 @@ public:
                         cJSON_Delete(jsonAudio); cJSON_Delete(json);
                         return status;
                     }
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
-                    std::ofstream fstream(filePath, std::ofstream::binary);
-                    fstream << rawAudio;
-                    fstream.close();
-                    m_Files.insert(filePath);
-                    jsonFile = cJSON_CreateString(filePath);
-                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
+
+                    if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw")) {
+                        switch_status_t playbackStatus = streamRawToFreeswitch(session, rawAudio, sampleRate);
+                        cJSON_AddNumberToObject(jsonData, "bytes", rawAudio.size());
+                        if (!cJSON_GetObjectItem(jsonData, "sampleRate")) {
+                            cJSON_AddNumberToObject(jsonData, "sampleRate", sampleRate);
+                        }
+                        cJSON_AddStringToObject(jsonData, "playback", playbackStatus == SWITCH_STATUS_SUCCESS ? "ok" : "failed");
+                        if (playbackStatus != SWITCH_STATUS_SUCCESS) {
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) playback failed for raw audio\n", m_sessionId.c_str());
+                        }
+                        handledPlayback = true;
+                        status = SWITCH_TRUE;
+                    } else if(!fileType.empty()) {
+                        char filePath[256];
+                        switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
+                                        SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                        std::ofstream fstream(filePath, std::ofstream::binary);
+                        fstream << rawAudio;
+                        fstream.close();
+                        m_Files.insert(filePath);
+                        jsonFile = cJSON_CreateString(filePath);
+                        cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                    }
                 }
 
-                if(jsonFile) {
+                if(handledPlayback || jsonFile) {
                     char *jsonString = cJSON_PrintUnformatted(jsonData);
                     m_notify(session, EVENT_PLAY, jsonString);
                     message.assign(jsonString);
@@ -735,4 +811,3 @@ extern "C" {
         return SWITCH_STATUS_FALSE;
     }
 }
-
