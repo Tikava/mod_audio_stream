@@ -1,5 +1,42 @@
+# Build directories
 cmake-build-debug/
+cmake-build-release/
+build/
+build-*/
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CTestTestfile.cmake
+_CPack_Packages/
+_packages/
+
+# Compiled output
+*.so
+*.a
+*.o
+*.out
+
+# FetchContent / test deps cache
+_deps/
+
+# IDE
 .idea/
 .vscode/
-build/
-_packages
+*.swp
+*.swo
+*~
+
+# Temp audio files generated during testing
+*.tmp.wav
+*.tmp.mp3
+*.tmp.ogg
+*.tmp.r8
+*.tmp.r16
+*.tmp.r24
+*.tmp.r32
+*.tmp.r48
+*.tmp.r64

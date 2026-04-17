@@ -1,243 +1,419 @@
 # mod_audio_stream
 
-A FreeSWITCH module that streams L16 audio from a channel to a websocket endpoint. If websocket sends back responses (eg. JSON) it can be effectively used with ASR engines such as IBM Watson etc., or any other purpose you find applicable.
+A FreeSWITCH module that streams L16 audio from a channel to a WebSocket endpoint and plays back audio received from the server. Suitable for ASR engines, real-time AI voice assistants, or any bidirectional audio streaming use case.
 
-### Update (22/2/2025)
+## Features
 
-#### :rocket: **Introducing Bi-Directional Streaming with automatic playback**
+- **Full-duplex streaming** — sends audio to the server and plays back server audio simultaneously
+- **Automatic resampling** — SpeexDSP resampler for any sample rate conversion in both directions
+- **Raw PCM playback** — incoming raw audio is decoded, resampled, and written directly to the FreeSWITCH channel (no temp files)
+- **File-based playback** — wav/mp3/ogg received as base64 are saved to a temp file; path sent via `play` event for the application to act on
+- **Auto-reconnect** — exponential backoff reconnect (1 → 2 → 4 → 8 → 16 s) on connection drop
+- **Backpressure control** — frames are dropped (and counted) when the WebSocket send buffer exceeds 512 KB
+- **Per-message deflate** — zlib compression enabled by default
+- **mTLS support** — optional client certificate + CA verification for WSS connections
+- **Metrics API** — live connection and playback statistics via `uuid_audio_stream metrics`
 
-A new version `mod-audio-stream v1.0.3` has been published, featuring **raw binary stream** from the websocket.
-It can be downloaded from the **Releases** section (pre-release) and comes as a pre-built Debian 12 package.
+## About
 
-- Playback feature allows continuous forward streaming while the playback runs independently.
-- It is a **full-duplex streamer** between the caller and the websocket.
-- It supports **base64 encoded audio** as well as the **raw binary stream** from the websocket.
-- Playback can be **tracked, paused, or resumed** dynamically.
+- Uses [libwsc](https://github.com/amigniter/libwsc), an in-house RFC-6455 compliant WebSocket client based on libevent.
+- Inspired by mod_audio_fork.
 
-:small_blue_diamond: This release is a commercial product that is available for **free use**, including commercial use, with a limitation of **10 concurrent streaming channels**. For users requiring more than 10 channels, or access to the source code, please [contact us](mailto:amsoftswitch@gmail.com)
- for further information and licensing options.
-
-### About
-
-- The purpose of `mod_audio_stream` was to provide a simple, low-dependency yet effective module for streaming audio and receiving responses from a websocket server.
-- Introduced [libwsc](https://github.com/amigniter/libwsc), our in-house, **RFC-6455 compliant** websocket client developed specifically for `mod_audio_stream`.
-  - Replaces [ixwebsocket](https://machinezone.github.io/IXWebSocket/), which served us well for the past few years. `libwsc` is libevent-based, extremely lightweight, and optimized for low-latency audio streaming.
-- This module was inspired by mod_audio_fork.
+---
 
 ## Installation
 
 ### Dependencies
-It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev`, `libevent-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
-### Building
-After cloning please execute: **git submodule init** and **git submodule update** to initialize the submodule.
-#### Custom path
-If you built FreeSWITCH from source, eq. install dir is /usr/local/freeswitch, add path to pkgconfig:
+
 ```
-export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig
+libfreeswitch-dev  libssl-dev  zlib1g-dev  libevent-dev  libspeexdsp-dev
 ```
-To build the module, from the cloned repository:
-```
+
+### Building from source
+
+```bash
+git clone https://github.com/amigniter/mod_audio_stream.git
+cd mod_audio_stream
+git submodule init && git submodule update
+
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 sudo make install
 ```
-**TLS** is `OFF` by default. To build with TLS support add `-DUSE_TLS=ON` to cmake line.
 
-#### DEB Package
-To build DEB package after making the module:
+If FreeSWITCH was built from source (e.g. installed to `/usr/local/freeswitch`):
+```bash
+export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig
 ```
+
+#### DEB package
+
+```bash
+cd build
 cpack -G DEB
-```
-Debian package will be placed in root directory `_packages` folder.
-
-## Scripted Build & Installation
-
-```
-sudo apt-get -y install git \
-    && cd /usr/src/ \
-    && git clone https://github.com/amigniter/mod_audio_stream.git \
-    && cd mod_audio_stream \
-    && sudo bash ./build-mod-audio-stream.sh
+# output: _packages/mod-audio-stream_*.deb
 ```
 
-### Channel variables
-The following channel variables can be used to fine tune websocket connection and also configure mod_audio_stream logging:
+### Scripted install (Debian/Ubuntu)
 
-| Variable                               | Description                                             | Default |
-| -------------------------------------- | ------------------------------------------------------- | ------- |
-| STREAM_MESSAGE_DEFLATE                 | true or 1, disables per message deflate                 | off     |
-| STREAM_HEART_BEAT                      | number of seconds, interval to send the heart beat      | off     |
-| STREAM_SUPPRESS_LOG                    | true or 1, suppresses printing to log                   | off     |
-| STREAM_BUFFER_SIZE                     | buffer duration in milliseconds, divisible by 20        | 20      |
-| STREAM_EXTRA_HEADERS                   | JSON object for additional headers in string format     | none    |
-| ~~STREAM_NO_RECONNECT~~                    | true or 1, disables automatic websocket reconnection    | off     |
-| STREAM_TLS_CA_FILE                     | CA cert or bundle, or the special values SYSTEM or NONE | SYSTEM  |
-| STREAM_TLS_KEY_FILE                    | optional client key for WSS connections                 | none    |
-| STREAM_TLS_CERT_FILE                   | optional client cert for WSS connections                | none    |
-| STREAM_TLS_DISABLE_HOSTNAME_VALIDATION | true or 1 disable hostname check in WSS connections     | false   |
+```bash
+sudo apt-get install -y git \
+  && cd /usr/src/ \
+  && git clone https://github.com/amigniter/mod_audio_stream.git \
+  && cd mod_audio_stream \
+  && sudo bash ./build-mod-audio-stream.sh
+```
 
-- Per message deflate compression option is enabled by default. It can lead to a very nice bandwidth savings. To disable it set the channel var to `true|1`.
-- Heart beat, sent every xx seconds when there is no traffic to make sure that load balancers do not kill an idle connection.
-- Suppress parameter is omitted by default(false). All the responses from websocket server will be printed to the log. Not to flood the log you can suppress it by setting the value to `true|1`. Events are fired still, it only affects printing to the log.
-- `Buffer Size` actually represents a duration of audio chunk sent to websocket. If you want to send e.g. 100ms audio packets to your ws endpoint
-you would set this variable to 100. If ommited, default packet size of 20ms will be sent as grabbed from the audio channel (which is default FreeSWITCH frame size)
-- Extra headers should be a JSON object with key-value pairs representing additional HTTP headers. Each key should be a header name, and its corresponding value should be a string.
-  ```json
-  {
-      "Header1": "Value1",
-      "Header2": "Value2",
-      "Header3": "Value3"
-  }
-- ~~Websocket automatic reconnection is on by default. To disable it set this channel variable to true or 1.~~
-  - libwsc does not support automatic reconnection.
-- TLS (for WSS) options can be fine tuned with the `STREAM_TLS_*` channel variables:
-  - `STREAM_TLS_CA_FILE` the ca certificate (or certificate bundle) file. By default is `SYSTEM` which means use the system defaults.
-Can be `NONE` which result in no peer verification.
-  - `STREAM_TLS_CERT_FILE` optional client tls certificate file sent to the server.
-  - `STREAM_TLS_KEY_FILE` optional client tls key file for the given certificate.
-  - `STREAM_TLS_DISABLE_HOSTNAME_VALIDATION` if `true`, disables the check of the hostname against the peer server certificate.
-Defaults to `false`, which enforces hostname match with the peer certificate.
+---
+
+## FreeSWITCH XML Configuration
+
+Global defaults can be set in `autoload_configs/audio_stream.conf.xml`:
+
+```xml
+<configuration name="audio_stream.conf" description="mod_audio_stream config">
+  <settings>
+    <!-- Disable per-message deflate compression globally -->
+    <param name="message-deflate" value="false"/>
+
+    <!-- WebSocket ping interval in seconds (0 = disabled) -->
+    <param name="heart-beat" value="0"/>
+
+    <!-- Suppress websocket response logging -->
+    <param name="suppress-log" value="false"/>
+
+    <!-- Audio buffer size in ms sent per WebSocket frame (must be multiple of 20) -->
+    <param name="buffer-size" value="20"/>
+
+    <!-- Disable automatic reconnection on connection drop -->
+    <param name="no-reconnect" value="false"/>
+  </settings>
+</configuration>
+```
+
+Channel variables always override XML config values (see below).
+
+---
+
+## Channel Variables
+
+Fine-tune the connection per-session by setting these variables before calling `start`:
+
+| Variable | Description | Default |
+|---|---|---|
+| `STREAM_MESSAGE_DEFLATE` | `true`/`1` — disable per-message deflate (zlib) | compression **on** |
+| `STREAM_HEART_BEAT` | Seconds between WebSocket pings; `0` = disabled | `0` |
+| `STREAM_SUPPRESS_LOG` | `true`/`1` — suppress logging of server responses | `false` |
+| `STREAM_BUFFER_SIZE` | Audio buffer duration in ms before sending (multiple of 20) | `20` |
+| `STREAM_EXTRA_HEADERS` | JSON object of extra HTTP headers sent on WS handshake | — |
+| `STREAM_NO_RECONNECT` | `true`/`1` — disable auto-reconnect on drop | `false` |
+| `STREAM_TLS_CA_FILE` | CA certificate/bundle file for WSS. Special: `SYSTEM` or `NONE` | `SYSTEM` |
+| `STREAM_TLS_KEY_FILE` | Client TLS key file | — |
+| `STREAM_TLS_CERT_FILE` | Client TLS certificate file | — |
+| `STREAM_TLS_DISABLE_HOSTNAME_VALIDATION` | `true`/`1` — skip TLS hostname check | `false` |
+
+**Examples:**
+
+```
+<action application="set" data="STREAM_BUFFER_SIZE=100"/>
+<action application="set" data="STREAM_HEART_BEAT=30"/>
+<action application="set" data="STREAM_EXTRA_HEADERS={'Authorization':'Bearer token123'}"/>
+<action application="set" data="STREAM_TLS_CA_FILE=/etc/ssl/certs/ca-certificates.crt"/>
+```
+
+---
 
 ## API
 
-### Commands
-The freeswitch module exposes the following API commands:
+### `uuid_audio_stream <uuid> start <wss-url> <mix-type> <sample-rate> [metadata]`
+
+Attaches a media bug and opens a WebSocket connection to start streaming.
+
+| Parameter | Values | Description |
+|---|---|---|
+| `uuid` | FreeSWITCH channel UUID | Target channel |
+| `wss-url` | `ws://` or `wss://` URL | WebSocket server endpoint |
+| `mix-type` | `mono` / `mixed` / `stereo` | Audio capture mode |
+| `sample-rate` | `8k`, `16k`, or any multiple of 8000 | Output sample rate (resampled if needed) |
+| `metadata` | UTF-8 string (optional) | Sent as text before audio streaming begins |
+
+**Mix types:**
+- `mono` — captures inbound audio only (caller → server)
+- `mixed` — mixes inbound + outbound into a single channel
+- `stereo` — two channels: inbound on left, outbound on right
+
+**Example:**
+```
+uuid_audio_stream 1234-abcd-... start wss://asr.example.com/stream mono 16k {"language":"en"}
+```
+
+---
+
+### `uuid_audio_stream <uuid> stop [metadata]`
+
+Stops streaming and closes the WebSocket. If `metadata` is provided it is sent as a final text message before closing.
 
 ```
-uuid_audio_stream <uuid> start <wss-url> <mix-type> <sampling-rate> <metadata>
+uuid_audio_stream 1234-abcd-... stop {"reason":"user_hangup"}
 ```
-Attaches a media bug and starts streaming audio (in L16 format) to the websocket server. FS default is 8k. If sampling-rate is other than 8k it will be resampled.
-- `uuid` - Freeswitch channel unique id
-- `wss-url` - websocket url `ws://` or `wss://`
-- `mix-type` - choice of 
-  - "mono" - single channel containing caller's audio
-  - "mixed" - single channel containing both caller and callee audio
-  - "stereo" - two channels with caller audio in one and callee audio in the other.
-- `sampling-rate` - choice of
-  - "8k" = 8000 Hz sample rate will be generated
-  - "16k" = 16000 Hz sample rate will be generated
-- `metadata` - (optional) a valid `utf-8` text to send. It will be sent the first before audio streaming starts.
+
+---
+
+### `uuid_audio_stream <uuid> send_text <text>`
+
+Sends a UTF-8 text message to the WebSocket server on the active connection.
 
 ```
-uuid_audio_stream <uuid> send_text <metadata>
+uuid_audio_stream 1234-abcd-... send_text {"action":"start_recognition"}
 ```
-Sends a text to the websocket server. Requires a valid `utf-8` text.
+
+---
+
+### `uuid_audio_stream <uuid> pause`
+
+Pauses audio capture. Incoming frames are not forwarded to the server. Playback continues.
+
+---
+
+### `uuid_audio_stream <uuid> resume`
+
+Resumes audio capture after pause.
+
+---
+
+### `uuid_audio_stream <uuid> metrics`
+
+Returns a JSON object with live statistics for the session. Returns `+OK <json>` on success.
 
 ```
-uuid_audio_stream <uuid> stop <metadata>
+uuid_audio_stream 1234-abcd-... metrics
 ```
-Stops audio stream and closes websocket connection. If _metadata_ is provided it will be sent before the connection is closed.
 
+Response:
+```json
+{
+  "bufferedBytes": 0,
+  "playbackQueue": 0,
+  "backpressureDrops": 0,
+  "playbackEnqueued": 12,
+  "playbackDrained": 12,
+  "reconnectAttempts": 0,
+  "connected": "true"
+}
 ```
-uuid_audio_stream <uuid> pause
-```
-Pauses audio stream
 
-```
-uuid_audio_stream <uuid> resume
-```
-Resumes audio stream
+| Field | Description |
+|---|---|
+| `bufferedBytes` | Bytes queued in the WebSocket send buffer |
+| `playbackQueue` | Number of audio items waiting to be played |
+| `backpressureDrops` | Frames dropped due to WebSocket buffer overflow (>512 KB) |
+| `playbackEnqueued` | Total audio chunks enqueued for playback since session start |
+| `playbackDrained` | Total audio chunks fully played back |
+| `reconnectAttempts` | Number of automatic reconnection attempts |
+| `connected` | `"true"` / `"false"` |
+
+---
 
 ## Events
-Module will generate the following event types:
-- `mod_audio_stream::json`
-- `mod_audio_stream::connect`
-- `mod_audio_stream::disconnect`
-- `mod_audio_stream::error`
-- `mod_audio_stream::play`
 
-### response
-Message received from websocket endpoint. Json expected, but it contains whatever the websocket server's response is.
-#### Freeswitch event generated
-**Name**: mod_audio_stream::json
-**Body**: WebSocket server response
+The module fires the following FreeSWITCH custom events:
 
-### connect
-Successfully connected to websocket server.
-#### Freeswitch event generated
-**Name**: mod_audio_stream::connect
-**Body**: JSON
+### `mod_audio_stream::connect`
+
+Fired when the WebSocket connection is established. Initial metadata (if set) is sent to the server before this event fires.
+
+```json
+{ "status": "connected" }
+```
+
+---
+
+### `mod_audio_stream::disconnect`
+
+Fired when the WebSocket connection is closed by the server or network.
+
 ```json
 {
-	"status": "connected"
+  "status": "disconnected",
+  "message": { "code": 1000, "reason": "Normal closure" }
 }
 ```
 
-### disconnect
-Disconnected from websocket server.
-#### Freeswitch event generated
-**Name**: mod_audio_stream::disconnect
-**Body**: JSON
+---
+
+### `mod_audio_stream::error`
+
+Fired on a connection error. The module will attempt automatic reconnect (unless `STREAM_NO_RECONNECT=true`).
+
 ```json
 {
-	"status": "disconnected",
-	"message": {
-		"code": 1000,
-		"reason": "Normal closure"
-	}
+  "status": "error",
+  "message": { "code": 6, "error": "TCP connection failed" }
 }
 ```
-- code: `<int>`
-- reason: `<string>`
 
-### error
-There is an error with the connection. Multiple fields will be available on the event to describe the error.
-#### Freeswitch event generated
-**Name**: mod_audio_stream::error
-**Body**: JSON
-```json
-{
-	"status": "error",
-	"message": {
-		"code": 1,
-		"error": "String explaining the error"
-	}
-}
-```
-- code: `<int>`
-- error: `<string>`
+| Code | Name | Meaning |
+|:---:|---|---|
+| 1 | `IO` | I/O error reading/writing socket |
+| 2 | `INVALID_HEADER` | Server sent malformed WebSocket header |
+| 3 | `SERVER_MASKED` | Server sent masked frames (spec violation) |
+| 4 | `NOT_SUPPORTED` | Requested extension not supported |
+| 5 | `PING_TIMEOUT` | No PONG within timeout |
+| 6 | `CONNECT_FAILED` | TCP connect or DNS lookup failed |
+| 7 | `TLS_INIT_FAILED` | SSL context initialisation failed |
+| 8 | `SSL_HANDSHAKE_FAILED` | TLS handshake failed |
+| 9 | `SSL_ERROR` | Generic OpenSSL error (cert, cipher, etc.) |
 
-#### Possible `code` values
+---
 
-| Code | Enum Name             | Meaning                                              |
-|:----:|:----------------------|:-----------------------------------------------------|
-| 1    | `IO`                  | I/O error when reading/writing sockets               |
-| 2    | `INVALID_HEADER`      | Server sent a malformed WebSocket header             |
-| 3    | `SERVER_MASKED`       | Server frames were masked (not allowed by spec)      |
-| 4    | `NOT_SUPPORTED`       | Requested feature (e.g. extension) not supported     |
-| 5    | `PING_TIMEOUT`        | No PONG received within timeout                      |
-| 6    | `CONNECT_FAILED`      | TCP connection or DNS lookup failed                  |
-| 7    | `TLS_INIT_FAILED`     | Couldn't initialize SSL/TLS context                  |
-| 8    | `SSL_HANDSHAKE_FAILED`| SSL/TLS handshake with server failed                 |
-| 9    | `SSL_ERROR`           | Generic OpenSSL error (certificate, cipher, etc.)    |
+### `mod_audio_stream::json`
 
+Fired when the server sends a message that the module did not handle internally (anything that is not `{"type":"streamAudio",...}`). The event body contains the raw server response.
 
-### play
-**Name**: mod_audio_stream::play
-**Body**: JSON
+---
 
-Websocket server may return JSON object containing base64 encoded audio to be played by the user. To use this feature, response must follow the format:
+### `mod_audio_stream::play`
+
+Fired when the server sends a `streamAudio` message with audio data.
+
+**Server message format:**
+
 ```json
 {
   "type": "streamAudio",
   "data": {
     "audioDataType": "raw",
-    "sampleRate": 8000,
-    "audioData": "base64 encoded audio"
+    "sampleRate": 16000,
+    "channels": 1,
+    "audioData": "<base64-encoded PCM s16le>"
   }
 }
 ```
-- audioDataType: `<raw|wav|mp3|ogg>`
 
-Event generated by the module (subclass: _mod_audio_stream::play_) will be the same as the `data` element with the **file** added to it representing filePath:
+Supported `audioDataType` values:
+
+| Type | Behaviour |
+|---|---|
+| `raw` | Decoded from base64, resampled to channel rate/channels via SpeexDSP, written directly to the FreeSWITCH channel. Event contains playback status. |
+| `wav` | Saved to a temp file. Event contains `file` path. Application must play it (e.g. `playback`). |
+| `mp3` | Same as `wav`. |
+| `ogg` | Same as `wav`. |
+
+**Event body for `raw`:**
+
 ```json
 {
   "audioDataType": "raw",
-  "sampleRate": 8000,
-  "file": "/path/to/the/file"
+  "sampleRate": 16000,
+  "channels": 1,
+  "bytes": 6400,
+  "playback": "ok"
 }
 ```
-If printing to the log is not suppressed, `response` printed to the console will look the same as the event. The original response containing base64 encoded audio is replaced because it can be quite huge.
 
-All the files generated by this feature will reside at the temp directory and will be deleted when the session is closed.
+**Event body for `wav`/`mp3`/`ogg`:**
+
+```json
+{
+  "audioDataType": "wav",
+  "sampleRate": 8000,
+  "file": "/tmp/1234-abcd-0.tmp.wav"
+}
+```
+
+Temp files are automatically deleted when the session ends (`stop` or hangup).
+
+---
+
+## Audio Flow
+
+### Outbound (channel → server)
+
+```
+FreeSWITCH channel (RTP, 20ms frames, PCM s16le)
+  │
+  ▼ stream_frame()  [media thread, non-blocking trylock]
+  │
+  ├─ [no resampler] ──► writeBinary() ──► WebSocket frame (binary, raw PCM)
+  │
+  └─ [resampler]    ──► speex_resampler ──► writeBinary() ──► WebSocket frame
+                         (e.g. 8 kHz → 16 kHz)
+```
+
+- Compression: per-message deflate (zlib), enabled by default
+- Transport: `ws://` (plain) or `wss://` (TLS via OpenSSL)
+- Frame size: controlled by `STREAM_BUFFER_SIZE` (default 20 ms)
+- Backpressure: frames dropped when WebSocket buffer ≥ 512 KB
+
+### Inbound (server → channel)
+
+```
+WebSocket server sends {"type":"streamAudio", "data":{...}}
+  │
+  ▼ processMessage()  [WebSocket event thread]
+  │ base64 decode
+  │ speex_resampler: src rate/channels → channel rate/channels
+  │ enqueuePlaybackResampled() ──► m_playback_queue (deque, mutex-protected)
+  │
+  ▼ playbackLoop()  [dedicated playback thread, started lazily]
+    mix multiple queued items (int32 accumulator, clamped to int16)
+    switch_core_session_write_frame()  [20ms chunks]
+```
+
+---
+
+## Thread Model
+
+Each active streaming session uses **up to 3 threads** plus a short-lived reconnect thread:
+
+| Thread | Lifetime | Role |
+|---|---|---|
+| **FreeSWITCH media thread** | Duration of channel | Captures audio frames, calls `stream_frame()` |
+| **WebSocket thread** (libwsc/libevent) | From `start` to `stop` | Drives the WebSocket event loop, fires message/open/close/error callbacks |
+| **Playback thread** | Lazy start on first queued audio; exits when queue is empty and shutdown requested | Reads `m_playback_queue`, mixes, writes to channel |
+| **Reconnect thread** | Short-lived on drop | Exponential backoff (1 → 2 → 4 → 8 → 16 s), max 5 attempts |
+
+Synchronisation:
+- `tech_pvt->mutex` — guards WebSocket writes from the media thread (`trylock`, never blocks)
+- `m_playback_mutex` + `m_playback_cv` — guards the playback queue
+- Atomics: `m_shutdown`, `m_reconnecting`, `m_playback_thread_started`, all metric counters
+
+---
+
+## Tools
+
+The `tools/` directory contains minimal test servers:
+
+### `tools/ws_test_server.py` (Python)
+
+```bash
+pip install websockets
+# Listen only, log all traffic
+python3 tools/ws_test_server.py --port 8765
+
+# Send a raw PCM file to the caller on connect
+python3 tools/ws_test_server.py --port 8765 --send-raw sample.raw --rate 16000
+```
+
+### `tools/ws_test_server.js` (Node.js)
+
+```bash
+npm install ws
+# Listen only
+node tools/ws_test_server.js --port 8765
+
+# Echo all binary frames back as streamAudio (loopback test)
+node tools/ws_test_server.js --port 8765
+
+# Send a raw PCM file on connect
+node tools/ws_test_server.js --port 8765 --send-raw sample.raw --rate 16000 --channels 1
+```
+
+The Node.js server automatically echoes received binary audio back as `streamAudio` messages — useful for testing the full duplex playback loop.
+
+---
+
+## Debian Repository
+
+See [README.debian](README.debian) for instructions on using the pre-built Debian package repository.

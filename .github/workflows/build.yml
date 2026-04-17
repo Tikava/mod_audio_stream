@@ -1,0 +1,154 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master, develop, "feature/**" ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    name: Build on Ubuntu ${{ matrix.ubuntu }}
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: [ "22.04", "24.04" ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libfreeswitch-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libevent-dev \
+            libspeexdsp-dev
+
+      - name: Configure (Release)
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify .so exists
+        run: test -f build/mod_audio_stream.so
+
+      - name: Check for undefined symbols
+        run: |
+          nm -u build/mod_audio_stream.so | grep -v "GLIBC\|pthread\|speex\|SSL\|OPENSSL\|event\|switch_\|cJSON\|z_" || true
+
+  lint:
+    name: Lint (cppcheck)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Install FreeSWITCH headers (for include path)
+        run: sudo apt-get install -y libfreeswitch-dev libspeexdsp-dev
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            -I/usr/include/freeswitch \
+            -I/usr/include/speex \
+            --language=c++ \
+            --std=c++11 \
+            audio_streamer_glue.cpp base64.cpp
+
+      - name: Run cppcheck (C files)
+        run: |
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            -I/usr/include/freeswitch \
+            --language=c \
+            --std=c99 \
+            mod_audio_stream.c
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libfreeswitch-dev libssl-dev zlib1g-dev libevent-dev libspeexdsp-dev
+
+      - name: Configure with tests
+        run: |
+          cmake -B build-test \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build-test --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build-test/tests --output-on-failure -V
+
+  package:
+    name: Build DEB package
+    runs-on: ubuntu-22.04
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libfreeswitch-dev libssl-dev zlib1g-dev libevent-dev libspeexdsp-dev
+
+      - name: Configure & Build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Package DEB
+        working-directory: build
+        run: cpack -G DEB
+
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-audio-stream-deb
+          path: _packages/*.deb
+          retention-days: 30

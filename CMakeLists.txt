@@ -21,6 +21,7 @@ find_package(SpeexDSP REQUIRED)
 
 pkg_check_modules(FreeSWITCH REQUIRED IMPORTED_TARGET freeswitch)
 pkg_get_variable(FS_MOD_DIR freeswitch modulesdir)
+pkg_get_variable(FS_CONF_DIR freeswitch sysconfdir)
 message(STATUS "FreeSWITCH modules dir: ${FS_MOD_DIR}")
 
 add_subdirectory(libs/libwsc)
@@ -77,6 +78,12 @@ install(TARGETS ${PROJECT_NAME}
         COMPONENT ${PROJECT_NAME}
         DESTINATION ${FS_MOD_DIR})
 
+if(FS_CONF_DIR)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/conf/audio_stream.conf.xml"
+            DESTINATION "${FS_CONF_DIR}/autoload_configs"
+            COMPONENT ${PROJECT_NAME})
+endif()
+
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
 	DESTINATION "${CMAKE_INSTALL_DOCDIR}"
 	COMPONENT changelog.gz
@@ -85,3 +92,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
 message(STATUS "Components to pack: ${CPACK_COMPONENTS_ALL}")
 
 include(Packing)
+
+option(BUILD_TESTS "Build unit tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

@@ -1,0 +1,18 @@
+<configuration name="audio_stream.conf" description="mod_audio_stream config">
+  <settings>
+    <!-- Disable per-message deflate compression (true/1 = disable) -->
+    <param name="message-deflate" value="false"/>
+
+    <!-- WebSocket ping interval in seconds; 0 = disabled -->
+    <param name="heart-beat" value="0"/>
+
+    <!-- Suppress logging of websocket server responses (true/1 = suppress) -->
+    <param name="suppress-log" value="false"/>
+
+    <!-- Audio buffer duration in ms per WebSocket frame; must be a multiple of 20 -->
+    <param name="buffer-size" value="20"/>
+
+    <!-- Disable automatic reconnection on connection drop (true/1 = disable) -->
+    <param name="no-reconnect" value="false"/>
+  </settings>
+</configuration>

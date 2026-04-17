@@ -46,6 +46,13 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             break;
 
         case SWITCH_ABC_TYPE_WRITE:
+            if (tech_pvt->close_requested) {
+                return SWITCH_FALSE;
+            }
+            /* In mixed/stereo mode we want to capture outbound audio too */
+            return stream_frame(bug);
+            break;
+
         default:
             break;
     }
@@ -136,7 +143,7 @@ static switch_status_t send_text(switch_core_session_t *session, char* text) {
     return status;
 }
 
-#define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
+#define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | metrics] [wss-url | path] [mono | mixed | stereo] [8000 | 16000] [metadata]"
 SWITCH_STANDARD_API(stream_function)
 {
     char *mycmd = NULL, *argv[6] = { 0 };
@@ -144,13 +151,16 @@ SWITCH_STANDARD_API(stream_function)
 
     switch_status_t status = SWITCH_STATUS_FALSE;
 
-    if (!zstr(cmd) && (mycmd = strdup(cmd))) {
+    if (zstr(cmd)) {
+        stream->write_function(stream, "-USAGE: %s\n", STREAM_API_SYNTAX);
+        return SWITCH_STATUS_SUCCESS;
+    }
+    if ((mycmd = strdup(cmd))) {
         argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
     }
-    assert(cmd);
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "mod_audio_stream cmd: %s\n", cmd ? cmd : "");
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "mod_audio_stream cmd: %s\n", cmd);
 
-    if (zstr(cmd) || argc < 2 || (0 == strcmp(argv[1], "start") && argc < 4)) {
+    if (argc < 2 || (0 == strcmp(argv[1], "start") && argc < 4)) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error with command %s %s %s.\n", cmd, argv[0], argv[1]);
         stream->write_function(stream, "-USAGE: %s\n", STREAM_API_SYNTAX);
         goto done;
@@ -169,6 +179,17 @@ SWITCH_STANDARD_API(stream_function)
                 status = do_pauseresume(lsession, 1);
             } else if (!strcasecmp(argv[1], "resume")) {
                 status = do_pauseresume(lsession, 0);
+            } else if (!strcasecmp(argv[1], "metrics")) {
+                char *json_metrics = NULL;
+                status = stream_session_metrics(lsession, &json_metrics);
+                if (status == SWITCH_STATUS_SUCCESS && json_metrics) {
+                    stream->write_function(stream, "+OK %s\n", json_metrics);
+                    switch_safe_free(json_metrics);
+                } else {
+                    stream->write_function(stream, "-ERR No active stream on session\n");
+                }
+                switch_core_session_rwunlock(lsession);
+                goto done;
             } else if (!strcasecmp(argv[1], "send_text")) {
                 if (argc < 3) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -259,7 +280,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     if (switch_event_reserve_subclass(EVENT_JSON) != SWITCH_STATUS_SUCCESS ||
         switch_event_reserve_subclass(EVENT_CONNECT) != SWITCH_STATUS_SUCCESS ||
         switch_event_reserve_subclass(EVENT_ERROR) != SWITCH_STATUS_SUCCESS ||
-        switch_event_reserve_subclass(EVENT_DISCONNECT) != SWITCH_STATUS_SUCCESS) {
+        switch_event_reserve_subclass(EVENT_DISCONNECT) != SWITCH_STATUS_SUCCESS ||
+        switch_event_reserve_subclass(EVENT_PLAY) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't register an event subclass for mod_audio_stream API.\n");
         return SWITCH_STATUS_TERM;
     }
@@ -270,6 +292,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid pause");
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid resume");
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid send_text");
+    switch_console_set_complete("add uuid_audio_stream ::console::list_uuid metrics");
 
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_stream API successfully loaded\n");
 
@@ -286,6 +309,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_stream_shutdown)
     switch_event_free_subclass(EVENT_CONNECT);
     switch_event_free_subclass(EVENT_DISCONNECT);
     switch_event_free_subclass(EVENT_ERROR);
+    switch_event_free_subclass(EVENT_PLAY);
 
     return SWITCH_STATUS_SUCCESS;
 }
