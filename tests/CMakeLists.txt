@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
+project(mod_audio_stream_tests CXX)
+set(CMAKE_CXX_STANDARD 11)
+
+enable_testing()
 
 include(FetchContent)
 FetchContent_Declare(

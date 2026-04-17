@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ main, master ]
 
+# Reusable step: add the FreeSWITCH APT repository.
+# Ubuntu 22.04 (Jammy) is ABI-compatible with Debian Bookworm for FS packages.
+# Ubuntu 24.04 (Noble) needs the 'noble' dist; kept as env var per matrix job.
+env:
+  FS_REPO_KEY_URL: https://files.freeswitch.org/repo/deb/debian-release/pubkey.gpg
+  FS_REPO_LIST: https://files.freeswitch.org/repo/deb/debian-release/
+
 jobs:
   build:
     name: Build on Ubuntu ${{ matrix.ubuntu }}
@@ -13,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ubuntu: [ "22.04", "24.04" ]
+        ubuntu: [ "22.04" ]  # 24.04 pending FreeSWITCH noble packages
 
     steps:
       - name: Checkout
@@ -21,11 +28,20 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Add FreeSWITCH repository
+        run: |
+          sudo apt-get install -y --no-install-recommends gnupg2 wget
+          wget -qO /usr/share/keyrings/freeswitch-archive-keyring.gpg \
+            ${{ env.FS_REPO_KEY_URL }}
+          echo "deb [signed-by=/usr/share/keyrings/freeswitch-archive-keyring.gpg] \
+            ${{ env.FS_REPO_LIST }} bookworm main" | \
+            sudo tee /etc/apt/sources.list.d/freeswitch.list
+          sudo apt-get update -qq
+
       - name: Install dependencies
         run: |
-          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build pkg-config \
+            cmake pkg-config \
             libfreeswitch-dev \
             libssl-dev \
             zlib1g-dev \
@@ -33,20 +49,13 @@ jobs:
             libspeexdsp-dev
 
       - name: Configure (Release)
-        run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --parallel
 
       - name: Verify .so exists
         run: test -f build/mod_audio_stream.so
-
-      - name: Check for undefined symbols
-        run: |
-          nm -u build/mod_audio_stream.so | grep -v "GLIBC\|pthread\|speex\|SSL\|OPENSSL\|event\|switch_\|cJSON\|z_" || true
 
   lint:
     name: Lint (cppcheck)
@@ -58,13 +67,22 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install cppcheck
-        run: sudo apt-get install -y cppcheck
+      - name: Add FreeSWITCH repository
+        run: |
+          sudo apt-get install -y --no-install-recommends gnupg2 wget
+          wget -qO /usr/share/keyrings/freeswitch-archive-keyring.gpg \
+            ${{ env.FS_REPO_KEY_URL }}
+          echo "deb [signed-by=/usr/share/keyrings/freeswitch-archive-keyring.gpg] \
+            ${{ env.FS_REPO_LIST }} bookworm main" | \
+            sudo tee /etc/apt/sources.list.d/freeswitch.list
+          sudo apt-get update -qq
 
-      - name: Install FreeSWITCH headers (for include path)
-        run: sudo apt-get install -y libfreeswitch-dev libspeexdsp-dev
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            cppcheck libfreeswitch-dev libspeexdsp-dev
 
-      - name: Run cppcheck
+      - name: Run cppcheck (C++)
         run: |
           cppcheck \
             --enable=warning,style,performance,portability \
@@ -77,7 +95,7 @@ jobs:
             --std=c++11 \
             audio_streamer_glue.cpp base64.cpp
 
-      - name: Run cppcheck (C files)
+      - name: Run cppcheck (C)
         run: |
           cppcheck \
             --enable=warning,style,performance,portability \
@@ -96,28 +114,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        # tests/ is a standalone CMake project — no FreeSWITCH needed, no submodules
 
-      - name: Install dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build pkg-config \
-            libfreeswitch-dev libssl-dev zlib1g-dev libevent-dev libspeexdsp-dev
+          sudo apt-get install -y --no-install-recommends cmake
 
-      - name: Configure with tests
-        run: |
-          cmake -B build-test \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DBUILD_TESTS=ON
+      - name: Configure tests (standalone, no FreeSWITCH)
+        run: cmake -B build-test -DCMAKE_BUILD_TYPE=Debug -S tests
 
       - name: Build tests
         run: cmake --build build-test --parallel
 
       - name: Run tests
-        run: ctest --test-dir build-test/tests --output-on-failure -V
+        run: ctest --test-dir build-test --output-on-failure -V
 
   package:
     name: Build DEB package
@@ -130,16 +141,25 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Add FreeSWITCH repository
+        run: |
+          sudo apt-get install -y --no-install-recommends gnupg2 wget
+          wget -qO /usr/share/keyrings/freeswitch-archive-keyring.gpg \
+            ${{ env.FS_REPO_KEY_URL }}
+          echo "deb [signed-by=/usr/share/keyrings/freeswitch-archive-keyring.gpg] \
+            ${{ env.FS_REPO_LIST }} bookworm main" | \
+            sudo tee /etc/apt/sources.list.d/freeswitch.list
+          sudo apt-get update -qq
+
       - name: Install dependencies
         run: |
-          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build pkg-config \
+            cmake pkg-config \
             libfreeswitch-dev libssl-dev zlib1g-dev libevent-dev libspeexdsp-dev
 
       - name: Configure & Build
         run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel
 
       - name: Package DEB
