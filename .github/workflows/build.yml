@@ -6,41 +6,24 @@ on:
   pull_request:
     branches: [ main, master ]
 
-# Reusable step: add the FreeSWITCH APT repository.
-# Ubuntu 22.04 (Jammy) is ABI-compatible with Debian Bookworm for FS packages.
-# Ubuntu 24.04 (Noble) needs the 'noble' dist; kept as env var per matrix job.
-env:
-  FS_REPO_KEY_URL: https://files.freeswitch.org/repo/deb/debian-release/pubkey.gpg
-  FS_REPO_LIST: https://files.freeswitch.org/repo/deb/debian-release/
-
 jobs:
   build:
-    name: Build on Ubuntu ${{ matrix.ubuntu }}
-    runs-on: ubuntu-${{ matrix.ubuntu }}
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: [ "22.04" ]  # 24.04 pending FreeSWITCH noble packages
+    name: Build (Debian Bookworm)
+    runs-on: ubuntu-22.04
+    container: debian:bookworm
 
     steps:
+      - name: Install git for checkout
+        run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Add FreeSWITCH repository
-        run: |
-          sudo apt-get install -y --no-install-recommends gnupg2 wget
-          wget -qO /usr/share/keyrings/freeswitch-archive-keyring.gpg \
-            ${{ env.FS_REPO_KEY_URL }}
-          echo "deb [signed-by=/usr/share/keyrings/freeswitch-archive-keyring.gpg] \
-            ${{ env.FS_REPO_LIST }} bookworm main" | \
-            sudo tee /etc/apt/sources.list.d/freeswitch.list
-          sudo apt-get update -qq
-
       - name: Install dependencies
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             cmake pkg-config \
             libfreeswitch-dev \
             libssl-dev \
@@ -60,26 +43,20 @@ jobs:
   lint:
     name: Lint (cppcheck)
     runs-on: ubuntu-22.04
+    container: debian:bookworm
 
     steps:
+      - name: Install git for checkout
+        run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Add FreeSWITCH repository
-        run: |
-          sudo apt-get install -y --no-install-recommends gnupg2 wget
-          wget -qO /usr/share/keyrings/freeswitch-archive-keyring.gpg \
-            ${{ env.FS_REPO_KEY_URL }}
-          echo "deb [signed-by=/usr/share/keyrings/freeswitch-archive-keyring.gpg] \
-            ${{ env.FS_REPO_LIST }} bookworm main" | \
-            sudo tee /etc/apt/sources.list.d/freeswitch.list
-          sudo apt-get update -qq
-
       - name: Install dependencies
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             cppcheck libfreeswitch-dev libspeexdsp-dev
 
       - name: Run cppcheck (C++)
@@ -110,18 +87,18 @@ jobs:
   test:
     name: Unit tests
     runs-on: ubuntu-22.04
+    # No container — tests are standalone, no FreeSWITCH needed
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        # tests/ is a standalone CMake project — no FreeSWITCH needed, no submodules
 
       - name: Install build tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake
 
-      - name: Configure tests (standalone, no FreeSWITCH)
+      - name: Configure tests
         run: cmake -B build-test -DCMAKE_BUILD_TYPE=Debug -S tests
 
       - name: Build tests
@@ -133,27 +110,21 @@ jobs:
   package:
     name: Build DEB package
     runs-on: ubuntu-22.04
+    container: debian:bookworm
     needs: build
 
     steps:
+      - name: Install git for checkout
+        run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Add FreeSWITCH repository
-        run: |
-          sudo apt-get install -y --no-install-recommends gnupg2 wget
-          wget -qO /usr/share/keyrings/freeswitch-archive-keyring.gpg \
-            ${{ env.FS_REPO_KEY_URL }}
-          echo "deb [signed-by=/usr/share/keyrings/freeswitch-archive-keyring.gpg] \
-            ${{ env.FS_REPO_LIST }} bookworm main" | \
-            sudo tee /etc/apt/sources.list.d/freeswitch.list
-          sudo apt-get update -qq
-
       - name: Install dependencies
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             cmake pkg-config \
             libfreeswitch-dev libssl-dev zlib1g-dev libevent-dev libspeexdsp-dev
 
