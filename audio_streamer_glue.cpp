@@ -450,18 +450,38 @@ public:
         return client.isConnected();
     }
 
+    // Returns an estimate of bytes currently queued for sending.
+    // Tracks bytes added via writeBinary/writeText and decays them using a
+    // sliding 500ms window — a reasonable TCP drain estimate for audio rates.
     size_t bufferedAmount() {
-        return client.bufferedAmount();
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lk(m_send_history_mutex);
+        auto cutoff = now - std::chrono::milliseconds(500);
+        while (!m_send_history.empty() && m_send_history.front().ts < cutoff) {
+            m_send_history.pop_front();
+        }
+        size_t total = 0;
+        for (auto& e : m_send_history) total += e.bytes;
+        return total;
     }
 
     void writeBinary(uint8_t* buffer, size_t len) {
         if (!this->isConnected()) return;
+        {
+            std::lock_guard<std::mutex> lk(m_send_history_mutex);
+            m_send_history.push_back({len, std::chrono::steady_clock::now()});
+        }
         client.sendBinary(buffer, len);
     }
 
     void writeText(const char* text) {
         if (!this->isConnected()) return;
-        client.sendMessage(text, strlen(text));
+        size_t len = strlen(text);
+        {
+            std::lock_guard<std::mutex> lk(m_send_history_mutex);
+            m_send_history.push_back({len, std::chrono::steady_clock::now()});
+        }
+        client.sendMessage(text, len);
     }
 
     void deleteFiles() {
@@ -807,6 +827,13 @@ private:
     std::thread m_playback_thread;
     std::thread m_shutdown_thread;
     std::mutex m_shutdown_thread_mutex;
+
+    struct SendEntry {
+        size_t bytes;
+        std::chrono::steady_clock::time_point ts;
+    };
+    std::deque<SendEntry> m_send_history;
+    std::mutex m_send_history_mutex;
 };
 
 
